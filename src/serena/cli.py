@@ -35,6 +35,7 @@ from serena.constants import (
 )
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
+from serena.server.proxy import SerenaProxy
 from serena.tools import FindReferencingSymbolsTool, FindSymbolTool, GetSymbolsOverviewTool, SearchForPatternTool, ToolRegistry
 from serena.util.dataclass import get_dataclass_default
 from serena.util.logging import MemoryLogHandler
@@ -265,9 +266,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         file_handler.formatter = formatter
         Logger.root.addHandler(file_handler)
 
-        log.info("Initializing Serena MCP server")
-        log.info("Storing logs in %s", log_path)
-
         # Handle --project-from-cwd flag
         if project_from_cwd:
             if project is not None or project_file_arg is not None:
@@ -279,6 +277,22 @@ class TopLevelCommands(AutoRegisteringGroup):
                 log.warning("No project root found from %s; not activating any project", os.getcwd())
 
         project_file = project_file_arg or project
+        if transport == "stdio":
+            # Use Session Proxy for stdio transport to support concurrent projects
+            log.info("Using Session Proxy for stdio transport")
+            project_path = project_file or os.getcwd()
+            proxy = SerenaProxy(project_path=project_path, context=context, modes=list(modes))
+            try:
+                import asyncio
+
+                asyncio.run(proxy.run())
+            except Exception as e:
+                log.error(f"Session Proxy failed: {e}")
+                sys.exit(1)
+            return
+
+        log.info("Initializing Serena MCP server")
+        log.info("Storing logs in %s", log_path)
         factory = SerenaMCPFactory(context=context, project=project_file, memory_log_handler=memory_log_handler)
         server = factory.create_mcp_server(
             host=host,
