@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,28 +29,12 @@ class SerenaProxy:
 
     async def connect(self):
         # Try to connect to daemon
-        for i in range(3):
-            try:
-                self.reader, self.writer = await asyncio.open_unix_connection(str(DAEMON_SOCKET_PATH))
-                return
-            except (FileNotFoundError, ConnectionRefusedError):
-                if i == 0:
-                    debug_log("Daemon not running, starting it...")
-                    self._start_daemon()
-                    # Wait for daemon to start
-                    await asyncio.sleep(1)
-                else:
-                    await asyncio.sleep(1)
-
-        raise ConnectionError("Could not connect to Serena Daemon")
-
-    def _start_daemon(self):
-        # Start daemon process detached
-        # We assume 'serena' command is available or we use sys.executable
-        cmd = [sys.executable, "-m", "serena.server.daemon"]
-        debug_log(f"Starting daemon with {cmd}")
-        with open("/tmp/serena_daemon.out", "w") as out, open("/tmp/serena_daemon.err", "w") as err:
-            subprocess.Popen(cmd, start_new_session=True, stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+        try:
+            self.reader, self.writer = await asyncio.open_unix_connection(str(DAEMON_SOCKET_PATH))
+        except (FileNotFoundError, ConnectionRefusedError):
+            raise ConnectionError(
+                f"Could not connect to Serena Daemon at {DAEMON_SOCKET_PATH}. Please ensure the daemon is running via 'serena-daemon'."
+            )
 
     async def run(self):
         await self.connect()

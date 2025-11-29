@@ -117,8 +117,6 @@ async def test_proxy_connect_and_handshake():
 
             # Start Proxy
             proxy = SerenaProxy("/tmp/proxy_test", "default", [])
-            # Mock _start_daemon to do nothing (server is already running)
-            proxy._start_daemon = MagicMock()
 
             await proxy.connect()
 

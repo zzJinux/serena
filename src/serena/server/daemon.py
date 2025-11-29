@@ -19,8 +19,9 @@ DAEMON_SOCKET_PATH = Path(os.environ.get("SERENA_DAEMON_SOCKET", Path.home() / "
 
 
 class AgentManager:
-    def __init__(self):
+    def __init__(self, enable_gui_log_window: bool = False):
         self._agents: list[FastMCP] = []
+        self.enable_gui_log_window = enable_gui_log_window
 
     def create_agent(self, project_path: str, context: str, modes: list[str]) -> FastMCP:
         log.info(f"Creating new agent for {project_path}")
@@ -33,6 +34,7 @@ class AgentManager:
         mcp_server = factory.create_mcp_server(
             modes=modes,
             enable_web_dashboard=False,
+            enable_gui_log_window=self.enable_gui_log_window,
         )
         self._agents.append(mcp_server)
 
@@ -167,9 +169,9 @@ class ConnectionHandler:
 
 
 class SerenaDaemon:
-    def __init__(self):
-        self.manager = AgentManager()
+    def __init__(self, enable_gui_log_window: bool = False):
         self.socket_path = DAEMON_SOCKET_PATH
+        self.manager = AgentManager(enable_gui_log_window=enable_gui_log_window)
 
     async def start(self):
         # Ensure directory exists
