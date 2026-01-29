@@ -20,7 +20,7 @@ def mock_fastmcp():
 
 @pytest.fixture
 def mock_factory():
-    with patch("serena.server.daemon.SerenaMCPFactorySingleProcess") as mock:
+    with patch("serena.server.daemon.SerenaMCPFactory") as mock:
         yield mock
 
 
@@ -31,14 +31,59 @@ async def test_agent_manager_create_agent(mock_factory, mock_fastmcp):
     # Setup mocks
     factory_instance = mock_factory.return_value
     mcp_server = MagicMock()
+    serena_agent = MagicMock()
     factory_instance.create_mcp_server.return_value = mcp_server
+    factory_instance.agent = serena_agent
 
-    agent = manager.create_agent("/tmp/project", "default", [])
+    mcp, agent = manager.create_agent("/tmp/project", "default", [])
 
-    assert agent == mcp_server
+    assert mcp == mcp_server
+    assert agent == serena_agent
     assert len(manager._agents) == 1
+    assert manager._agents[0] == (mcp_server, serena_agent)
     mock_factory.assert_called_with(context="default", project="/tmp/project")
     factory_instance.create_mcp_server.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_remove_agent(mock_factory, mock_fastmcp):
+    manager = AgentManager()
+
+    # Setup mocks
+    factory_instance = mock_factory.return_value
+    mcp_server = MagicMock()
+    serena_agent = MagicMock()
+    factory_instance.create_mcp_server.return_value = mcp_server
+    factory_instance.agent = serena_agent
+
+    mcp, agent = manager.create_agent("/tmp/project", "default", [])
+    assert len(manager._agents) == 1
+
+    # Test removal
+    manager.remove_agent(mcp, agent)
+    assert len(manager._agents) == 0
+    agent.shutdown.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_manager_remove_agent_handles_shutdown_error(mock_factory, mock_fastmcp):
+    manager = AgentManager()
+
+    # Setup mocks
+    factory_instance = mock_factory.return_value
+    mcp_server = MagicMock()
+    serena_agent = MagicMock()
+    serena_agent.shutdown.side_effect = Exception("Shutdown failed")
+    factory_instance.create_mcp_server.return_value = mcp_server
+    factory_instance.agent = serena_agent
+
+    mcp, agent = manager.create_agent("/tmp/project", "default", [])
+    assert len(manager._agents) == 1
+
+    # Test removal - should not raise even if shutdown fails
+    manager.remove_agent(mcp, agent)
+    assert len(manager._agents) == 0
+    agent.shutdown.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -53,12 +98,13 @@ async def test_daemon_handshake():
 
         # Mock AgentManager to avoid creating real agents
         daemon.manager = MagicMock()
-        mock_agent = MagicMock()
-        # Mock _mcp_server attribute for the agent
-        mock_agent._mcp_server = MagicMock()
-        mock_agent._mcp_server.run = AsyncMock()
-        mock_agent._mcp_server.create_initialization_options = MagicMock()
-        daemon.manager.create_agent.return_value = mock_agent
+        mock_mcp = MagicMock()
+        mock_serena_agent = MagicMock()
+        # Mock _mcp_server attribute for the mcp
+        mock_mcp._mcp_server = MagicMock()
+        mock_mcp._mcp_server.run = AsyncMock()
+        mock_mcp._mcp_server.create_initialization_options = MagicMock()
+        daemon.manager.create_agent.return_value = (mock_mcp, mock_serena_agent)
 
         # Start daemon in background
         server_task = asyncio.create_task(daemon.start())

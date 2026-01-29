@@ -10,8 +10,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.shared.session import SessionMessage
 from mcp.types import JSONRPCMessage
 
+from serena.agent import SerenaAgent
 from serena.constants import SERENA_LOG_FORMAT
-from serena.mcp import SerenaMCPFactorySingleProcess  # Added SerenaMCPFactorySingleProcess
+from serena.mcp import SerenaMCPFactory
 
 log = logging.getLogger(__name__)
 
@@ -20,25 +21,37 @@ DAEMON_SOCKET_PATH = Path(os.environ.get("SERENA_DAEMON_SOCKET", Path.home() / "
 
 class AgentManager:
     def __init__(self, enable_gui_log_window: bool = False):
-        self._agents: list[FastMCP] = []
+        self._agents: list[tuple[FastMCP, SerenaAgent]] = []
         self.enable_gui_log_window = enable_gui_log_window
 
-    def create_agent(self, project_path: str, context: str, modes: list[str]) -> FastMCP:
+    def create_agent(self, project_path: str, context: str, modes: list[str]) -> tuple[FastMCP, SerenaAgent]:
         log.info(f"Creating new agent for {project_path}")
 
         # Create factory and instantiate the agent.
-        # We use SerenaMCPFactorySingleProcess to create the FastMCP instance.
+        # We use SerenaMCPFactory to create the FastMCP instance.
         # The actual execution (run) will be handled by the ConnectionHandler using custom streams.
-        factory = SerenaMCPFactorySingleProcess(context=context, project=project_path)
+        factory = SerenaMCPFactory(context=context, project=project_path)
 
         mcp_server = factory.create_mcp_server(
             modes=modes,
             enable_web_dashboard=False,
             enable_gui_log_window=self.enable_gui_log_window,
         )
-        self._agents.append(mcp_server)
+        agent = factory.agent
+        if agent is None:
+            raise RuntimeError("SerenaMCPFactory.agent is None after create_mcp_server")
+        self._agents.append((mcp_server, agent))
 
-        return mcp_server
+        return mcp_server, agent
+
+    def remove_agent(self, mcp: FastMCP, agent: SerenaAgent) -> None:
+        entry = (mcp, agent)
+        if entry in self._agents:
+            self._agents.remove(entry)
+        try:
+            agent.shutdown()
+        except Exception as e:
+            log.error(f"Error during agent shutdown: {e}", exc_info=True)
 
 
 class AsyncioReadStream:
@@ -114,6 +127,8 @@ class ConnectionHandler:
         self.modes: list[str] = []
 
     async def handle(self):
+        mcp: FastMCP | None = None
+        agent: SerenaAgent | None = None
         try:
             # 1. Handshake: Expect JSON with project info
             # We read line by line assuming the client sends a newline-delimited JSON for handshake
@@ -147,7 +162,7 @@ class ConnectionHandler:
                 return
 
             # 2. Create MCP Server
-            mcp = self.manager.create_agent(self.project_path, self.context, self.modes)  # Changed to create_agent
+            mcp, agent = self.manager.create_agent(self.project_path, self.context, self.modes)
 
             # 3. Run MCP Server with custom streams
             read_stream = AsyncioReadStream(self.reader)
@@ -166,6 +181,8 @@ class ConnectionHandler:
             traceback.print_exc()
         finally:
             self.writer.close()
+            if mcp is not None and agent is not None:
+                self.manager.remove_agent(mcp, agent)
 
 
 class SerenaDaemon:

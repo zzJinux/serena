@@ -231,6 +231,8 @@ class SerenaAgent:
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
         """
+        self._is_initialized = False
+
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
 
@@ -364,6 +366,8 @@ class SerenaAgent:
             # inform the GUI window (if any)
             if self._gui_log_viewer is not None:
                 self._gui_log_viewer.set_dashboard_url(dashboard_url)
+
+        self._is_initialized = True
 
     def get_current_tasks(self) -> list[TaskExecutor.TaskInfo]:
         """
@@ -781,7 +785,7 @@ class SerenaAgent:
         """
         Shuts down the agent, freeing resources and stopping background tasks.
         """
-        if not hasattr(self, "_is_initialized"):
+        if not getattr(self, "_is_initialized", False):
             return
         log.info("SerenaAgent is shutting down ...")
         if self._active_project is not None:
