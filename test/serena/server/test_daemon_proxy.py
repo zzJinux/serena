@@ -109,9 +109,12 @@ async def test_daemon_handshake():
         # Start daemon in background
         server_task = asyncio.create_task(daemon.start())
 
-        # Wait for socket
-        while not socket_path.exists():
+        # Wait for socket with timeout
+        for _ in range(50):  # 5 second timeout
+            if socket_path.exists():
+                break
             await asyncio.sleep(0.1)
+        assert socket_path.exists(), "Socket file was not created in time"
 
         # Connect with Proxy logic (manually)
         reader, writer = await asyncio.open_unix_connection(str(socket_path))

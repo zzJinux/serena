@@ -9,6 +9,7 @@ from sensai.util import logging
 from serena.constants import LOG_MESSAGES_BUFFER_SIZE, SERENA_LOG_FORMAT
 
 lg = logging
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,17 +56,35 @@ class MemoryLogHandler(logging.Handler):
                 for callback in self._emit_callbacks:
                     try:
                         callback(msg)
-                    except:
+                    except Exception:
                         pass
                 self._log_queue.task_done()
             except queue.Empty:
                 continue
+        # Drain remaining messages after stop signal (without calling callbacks)
+        while not self._log_queue.empty():
+            try:
+                msg = self._log_queue.get_nowait()
+                self._log_buffer.append(msg)
+                self._log_queue.task_done()
+            except queue.Empty:
+                break
 
     def get_log_messages(self, from_idx: int = 0) -> LogMessages:
         return self._log_buffer.get_log_messages(from_idx=from_idx)
 
     def clear_log_messages(self) -> None:
         self._log_buffer.clear()
+
+    def stop(self) -> None:
+        """Stop the background worker thread."""
+        self._stop_event.set()
+        if self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=1.0)
+            if self.worker_thread.is_alive():
+                log.warning("MemoryLogHandler worker thread did not stop within timeout")
+        # Clear callbacks to prevent further processing
+        self._emit_callbacks.clear()
 
 
 class LogBuffer:

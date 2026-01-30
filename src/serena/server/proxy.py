@@ -76,6 +76,7 @@ class SerenaProxy:
             await self.writer.drain()
 
         self.writer.close()
+        await self.writer.wait_closed()
 
     async def _forward_socket_to_stdout(self):
         debug_log("Starting socket forwarding")

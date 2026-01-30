@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import traceback
 from pathlib import Path
 
@@ -48,10 +49,12 @@ class AgentManager:
         entry = (mcp, agent)
         if entry in self._agents:
             self._agents.remove(entry)
+        else:
+            log.warning("Attempted to remove agent that was not in the active agents list")
         try:
             agent.shutdown()
         except Exception as e:
-            log.error(f"Error during agent shutdown: {e}", exc_info=True)
+            log.exception(f"Error during agent shutdown: {e}")
 
 
 class AsyncioReadStream:
@@ -109,6 +112,7 @@ class AsyncioWriteStream:
 
     async def aclose(self):
         self.writer.close()
+        await self.writer.wait_closed()
 
     async def __aenter__(self):
         return self
@@ -181,6 +185,7 @@ class ConnectionHandler:
             traceback.print_exc()
         finally:
             self.writer.close()
+            await self.writer.wait_closed()
             if mcp is not None and agent is not None:
                 self.manager.remove_agent(mcp, agent)
 
@@ -189,6 +194,9 @@ class SerenaDaemon:
     def __init__(self, enable_gui_log_window: bool = False):
         self.socket_path = DAEMON_SOCKET_PATH
         self.manager = AgentManager(enable_gui_log_window=enable_gui_log_window)
+        self._server: asyncio.AbstractServer | None = None
+        self._active_handlers: set[asyncio.Task[None]] = set()
+        self._shutting_down = False
 
     async def start(self):
         # Ensure directory exists
@@ -198,16 +206,56 @@ class SerenaDaemon:
         if self.socket_path.exists():
             self.socket_path.unlink()
 
-        server = await asyncio.start_unix_server(self.handle_client, str(self.socket_path))
+        # Register signal handlers for graceful shutdown
+        loop = asyncio.get_running_loop()
+        shutdown_callback = lambda: asyncio.create_task(self.shutdown())
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, shutdown_callback)
+
+        self._server = await asyncio.start_unix_server(self.handle_client, str(self.socket_path))
 
         log.info(f"Daemon listening on {self.socket_path}")
 
-        async with server:
-            await server.serve_forever()
+        async with self._server:
+            await self._server.serve_forever()
 
-    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def shutdown(self) -> None:
+        """Gracefully shutdown daemon and all agents."""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        log.info("Daemon shutting down...")
+
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+
+        # Cancel all active handlers
+        for task in list(self._active_handlers):
+            task.cancel()
+
+        # Wait for handlers to finish with timeout
+        if self._active_handlers:
+            await asyncio.wait(self._active_handlers, timeout=2.0)
+
+        # Shutdown all agents
+        for mcp, agent in list(self.manager._agents):
+            self.manager.remove_agent(mcp, agent)
+
+        # Clean up socket file
+        if self.socket_path.exists():
+            self.socket_path.unlink()
+
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         handler = ConnectionHandler(reader, writer, self.manager)
-        await handler.handle()
+        task = asyncio.current_task()
+        if task:
+            self._active_handlers.add(task)
+        try:
+            await handler.handle()
+        finally:
+            if task:
+                self._active_handlers.discard(task)
 
 
 def main():
@@ -218,7 +266,11 @@ def main():
     try:
         asyncio.run(daemon.start())
     except KeyboardInterrupt:
-        pass
+        log.info("Received KeyboardInterrupt, shutting down...")
+    finally:
+        # Ensure socket is cleaned up even if shutdown wasn't called
+        if daemon.socket_path.exists():
+            daemon.socket_path.unlink()
 
 
 if __name__ == "__main__":
