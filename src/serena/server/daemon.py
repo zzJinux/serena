@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import signal
+import threading
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 import anyio
@@ -14,24 +16,56 @@ from mcp.types import JSONRPCMessage
 from serena.agent import SerenaAgent
 from serena.constants import SERENA_LOG_FORMAT
 from serena.mcp import SerenaMCPFactory
+from serena.project import Project
 
 log = logging.getLogger(__name__)
 
 DAEMON_SOCKET_PATH = Path(os.environ.get("SERENA_DAEMON_SOCKET", Path.home() / ".serena" / "daemon.sock"))
 
 
+class SharedProjectPool:
+    """Ref-counted pool of Project instances keyed by canonical project root."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pool: dict[str, tuple[Project, int]] = {}
+
+    def acquire(self, project_root: str, create_fn: Callable[[], Project]) -> Project:
+        key = str(Path(project_root).resolve())
+        with self._lock:
+            if key in self._pool:
+                project, count = self._pool[key]
+                self._pool[key] = (project, count + 1)
+                return project
+            project = create_fn()
+            self._pool[key] = (project, 1)
+            return project
+
+    def release(self, project_root: str, timeout: float = 2.0) -> None:
+        key = str(Path(project_root).resolve())
+        with self._lock:
+            if key not in self._pool:
+                return
+            project, count = self._pool[key]
+            if count <= 1:
+                del self._pool[key]
+                project.shutdown(timeout=timeout)
+            else:
+                self._pool[key] = (project, count - 1)
+
+
 class AgentManager:
     def __init__(self, enable_gui_log_window: bool = False):
         self._agents: list[tuple[FastMCP, SerenaAgent]] = []
+        self._project_pool = SharedProjectPool()
         self.enable_gui_log_window = enable_gui_log_window
 
     def create_agent(self, project_path: str, context: str, modes: list[str]) -> tuple[FastMCP, SerenaAgent]:
         log.info(f"Creating new agent for {project_path}")
 
-        # Create factory and instantiate the agent.
-        # We use SerenaMCPFactory to create the FastMCP instance.
-        # The actual execution (run) will be handled by the ConnectionHandler using custom streams.
-        factory = SerenaMCPFactory(context=context, project=project_path)
+        # Create factory WITHOUT project — defer activation so we can inject the pool first.
+        # The MCP server hasn't started yet, so the client never sees the briefly unfiltered tool list.
+        factory = SerenaMCPFactory(context=context, project=None)
 
         mcp_server = factory.create_mcp_server(
             modes=modes,
@@ -41,6 +75,11 @@ class AgentManager:
         agent = factory.agent
         if agent is None:
             raise RuntimeError("SerenaMCPFactory.agent is None after create_mcp_server")
+
+        # Inject the shared project pool before activating the project
+        agent._project_pool = self._project_pool
+        agent.activate_project_from_path_or_name(project_path)
+
         self._agents.append((mcp_server, agent))
 
         return mcp_server, agent

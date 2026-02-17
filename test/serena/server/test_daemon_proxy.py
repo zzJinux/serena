@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from serena.server.daemon import AgentManager, SerenaDaemon
+from serena.server.daemon import AgentManager, SerenaDaemon, SharedProjectPool
 from serena.server.proxy import SerenaProxy
 
 
@@ -41,8 +41,11 @@ async def test_agent_manager_create_agent(mock_factory, mock_fastmcp):
     assert agent == serena_agent
     assert len(manager._agents) == 1
     assert manager._agents[0] == (mcp_server, serena_agent)
-    mock_factory.assert_called_with(context="default", project="/tmp/project")
+    # Factory is created without project (deferred activation via pool)
+    mock_factory.assert_called_with(context="default", project=None)
     factory_instance.create_mcp_server.assert_called_once()
+    # Project activation happens after pool injection
+    serena_agent.activate_project_from_path_or_name.assert_called_once_with("/tmp/project")
 
 
 @pytest.mark.asyncio
@@ -155,7 +158,7 @@ async def test_proxy_connect_and_handshake():
                 # Read handshake
                 line = await reader.readline()
                 data = json.loads(line)
-                assert data["project"] == "/tmp/proxy_test"
+                assert data["project"] == str(Path("/tmp/proxy_test").resolve())
 
                 # Send OK
                 writer.write(json.dumps({"status": "ok"}).encode() + b"\n")
@@ -186,3 +189,54 @@ async def test_proxy_connect_and_handshake():
 
             server.close()
             await server.wait_closed()
+
+
+class TestSharedProjectPool:
+    def test_acquire_creates_project(self):
+        pool = SharedProjectPool()
+        project = MagicMock()
+        result = pool.acquire("/tmp/project", create_fn=lambda: project)
+        assert result is project
+
+    def test_acquire_returns_same_instance(self):
+        pool = SharedProjectPool()
+        project = MagicMock()
+        first = pool.acquire("/tmp/project", create_fn=lambda: project)
+        second_create = MagicMock()
+        second = pool.acquire("/tmp/project", create_fn=second_create)
+        assert first is second
+        second_create.assert_not_called()
+
+    def test_release_decrements_refcount(self):
+        pool = SharedProjectPool()
+        project = MagicMock()
+        pool.acquire("/tmp/project", create_fn=lambda: project)
+        pool.acquire("/tmp/project", create_fn=lambda: MagicMock())
+        pool.release("/tmp/project")
+        project.shutdown.assert_not_called()
+        # Still acquirable after partial release
+        third = pool.acquire("/tmp/project", create_fn=lambda: MagicMock())
+        assert third is project
+
+    def test_release_shuts_down_on_last_release(self):
+        pool = SharedProjectPool()
+        project = MagicMock()
+        pool.acquire("/tmp/project", create_fn=lambda: project)
+        pool.release("/tmp/project", timeout=1.0)
+        project.shutdown.assert_called_once_with(timeout=1.0)
+
+    def test_double_release_is_safe(self):
+        pool = SharedProjectPool()
+        project = MagicMock()
+        pool.acquire("/tmp/project", create_fn=lambda: project)
+        pool.release("/tmp/project")
+        pool.release("/tmp/project")  # should not raise
+        project.shutdown.assert_called_once()
+
+    def test_canonical_paths(self):
+        """Paths that resolve to the same canonical path share a project."""
+        pool = SharedProjectPool()
+        project = MagicMock()
+        first = pool.acquire("/tmp/project", create_fn=lambda: project)
+        second = pool.acquire("/tmp/../tmp/project", create_fn=lambda: MagicMock())
+        assert first is second

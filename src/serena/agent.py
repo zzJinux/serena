@@ -32,6 +32,7 @@ from solidlsp.ls_config import Language
 
 if TYPE_CHECKING:
     from serena.gui_log_viewer import GuiLogViewer
+    from serena.server.daemon import SharedProjectPool
 
 log = logging.getLogger(__name__)
 TTool = TypeVar("TTool", bound="Tool")
@@ -243,6 +244,7 @@ class SerenaAgent:
 
         # project-specific instances, which will be initialized upon project activation
         self._active_project: Project | None = None
+        self._project_pool: "SharedProjectPool | None" = None
 
         # dashboard URL (set when dashboard is started)
         self._dashboard_url: str | None = None
@@ -627,6 +629,8 @@ class SerenaAgent:
 
     def _activate_project(self, project: Project, update_modes_and_tools: bool = True) -> None:
         log.info(f"Activating {project.project_name} at {project.project_root}")
+        if self._project_pool is not None:
+            project = self._project_pool.acquire(project.project_root, create_fn=lambda: project)
         self._active_project = project
 
         if update_modes_and_tools:
@@ -638,7 +642,9 @@ class SerenaAgent:
                 self.reset_language_server_manager()
 
         # initialize the language server in the background (if in language server mode)
-        if self.is_using_language_server():
+        # The `language_server_manager is None` guard prevents re-initializing on a shared
+        # project that already has language servers running.
+        if self.is_using_language_server() and project.language_server_manager is None:
             self.issue_task(init_language_server_manager)
 
         if self._project_activation_callback is not None:
@@ -801,7 +807,10 @@ class SerenaAgent:
 
         # Shutdown active project (language servers)
         if self._active_project is not None:
-            self._active_project.shutdown(timeout=timeout)
+            if self._project_pool is not None:
+                self._project_pool.release(self._active_project.project_root, timeout=timeout)
+            else:
+                self._active_project.shutdown(timeout=timeout)
             self._active_project = None
 
         # Stop GUI log viewer

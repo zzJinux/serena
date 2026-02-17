@@ -28,12 +28,13 @@ class SerenaProxy:
         self.writer: asyncio.StreamWriter | None = None
 
     async def connect(self):
+        socket_path = Path(os.environ.get("SERENA_DAEMON_SOCKET", Path.home() / ".serena" / "daemon.sock"))
         # Try to connect to daemon
         try:
-            self.reader, self.writer = await asyncio.open_unix_connection(str(DAEMON_SOCKET_PATH))
+            self.reader, self.writer = await asyncio.open_unix_connection(str(socket_path))
         except (FileNotFoundError, ConnectionRefusedError):
             raise ConnectionError(
-                f"Could not connect to Serena Daemon at {DAEMON_SOCKET_PATH}. Please ensure the daemon is running via 'serena-daemon'."
+                f"Could not connect to Serena Daemon at {socket_path}. Please ensure the daemon is running via 'serena-daemon'."
             )
 
     async def run(self):
