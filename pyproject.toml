@@ -135,6 +135,8 @@ type = "simple"
 # For custom markers, one can either adjust the env var or just use -m option in the command line,
 # as the second -m option will override the first one.
 test = "pytest test -vv"
+test-fast = "pytest test/serena/ --ignore=test/serena/test_serena_agent.py -v"
+test-agent-python = "pytest test/serena/test_serena_agent.py -k python -v"
 _black_check = "black --check src scripts test"
 _ruff_check = "ruff check src scripts test"
 _black_format = "black src scripts test"
