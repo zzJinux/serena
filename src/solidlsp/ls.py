@@ -82,12 +82,15 @@ class LSPFileBuffer:
         self.abs_path = abs_path
         self.language_server = language_server
         self.uri = uri
-        self._read_file_modified_date: float | None = None
-        self._contents: str | None = None
         self.version = version
         self.language_id = language_id
         self.ref_count = ref_count
         self.encoding = encoding
+        self.contents: str = FileUtils.read_file(str(abs_path), encoding)
+        try:
+            self.mtime: float = abs_path.stat().st_mtime
+        except OSError:
+            self.mtime = 0.0
         self._content_hash: str | None = None
         self._is_open_in_ls = False
         if open_in_ls:
@@ -125,32 +128,33 @@ class LSPFileBuffer:
         """Ensure that the file is opened in the language server."""
         self._open_in_ls()
 
-    @property
-    def contents(self) -> str:
-        file_modified_date = self.abs_path.stat().st_mtime
+    def refresh_from_disk(self) -> bool:
+        """Re-read the file if modified externally. Updates buffer + notifies LS."""
+        try:
+            current_mtime = self.abs_path.stat().st_mtime
+        except OSError:
+            log.warning(f"Cannot stat {self.abs_path} during refresh check, skipping")
+            return False
+        if current_mtime == self.mtime:
+            return False
+        fresh_contents = FileUtils.read_file(str(self.abs_path), self.encoding)
+        self.version += 1
+        self.contents = fresh_contents
+        self.mtime = current_mtime
+        self._content_hash = None
+        if self._is_open_in_ls:
+            self.language_server.server.notify.did_change_text_document(
+                {
+                    LSPConstants.TEXT_DOCUMENT: {  # type: ignore
+                        LSPConstants.VERSION: self.version,
+                        LSPConstants.URI: self.uri,
+                    },
+                    LSPConstants.CONTENT_CHANGES: [{LSPConstants.TEXT: fresh_contents}],
+                }
+            )
+        return True
 
-        # if contents are cached, check if they are stale (file modification since last read) and invalidate if so
-        if self._contents is not None:
-            assert self._read_file_modified_date is not None
-            if file_modified_date > self._read_file_modified_date:
-                self._contents = None
-
-        if self._contents is None:
-            self._read_file_modified_date = file_modified_date
-            self._contents = FileUtils.read_file(str(self.abs_path), self.encoding)
-            self._content_hash = None
-
-        return self._contents
-
-    @contents.setter
-    def contents(self, new_contents: str) -> None:
-        """
-        Sets new contents for the file buffer (in-memory change only).
-        Persistence of the change to disk must be handled separately.
-
-        :param new_contents: the new contents to set
-        """
-        self._contents = new_contents
+    def invalidate_content_hash(self) -> None:
         self._content_hash = None
 
     @property
@@ -717,6 +721,7 @@ class SolidLanguageServer(ABC):
                 fb = self.open_file_buffers[uri]
                 assert fb.uri == uri
                 assert fb.ref_count >= 1
+                fb.refresh_from_disk()
                 fb.ref_count += 1
                 if open_in_ls:
                     fb.ensure_open_in_ls()
@@ -789,6 +794,7 @@ class SolidLanguageServer(ABC):
 
         new_contents, new_l, new_c = TextUtils.insert_text_at_position(file_buffer.contents, line, column, text_to_be_inserted)
         file_buffer.contents = new_contents
+        file_buffer.invalidate_content_hash()
         self.server.notify.did_change_text_document(
             {
                 LSPConstants.TEXT_DOCUMENT: {  # type: ignore
@@ -833,6 +839,7 @@ class SolidLanguageServer(ABC):
             file_buffer.contents, start_line=start["line"], start_col=start["character"], end_line=end["line"], end_col=end["character"]
         )
         file_buffer.contents = new_contents
+        file_buffer.invalidate_content_hash()
         self.server.notify.did_change_text_document(
             {
                 LSPConstants.TEXT_DOCUMENT: {  # type: ignore
