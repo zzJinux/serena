@@ -1,6 +1,5 @@
 import concurrent.futures
 import threading
-import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ class TaskExecutor:
     def __init__(self, name: str):
         self._task_executor_lock = threading.Lock()
         self._task_executor_queue: list[TaskExecutor.Task] = []
+        self._task_executor_shutdown_event = threading.Event()
         self._task_executor_thread = Thread(target=self._process_task_queue, name=name, daemon=True)
         self._task_executor_thread.start()
         self._task_executor_task_index = 1
@@ -106,14 +106,15 @@ class TaskExecutor:
                 pass
 
     def _process_task_queue(self) -> None:
-        while True:
+        while not self._task_executor_shutdown_event.is_set():
             # obtain task from the queue
             task: TaskExecutor.Task | None = None
             with self._task_executor_lock:
                 if len(self._task_executor_queue) > 0:
                     task = self._task_executor_queue.pop(0)
             if task is None:
-                time.sleep(0.1)
+                # Use wait with timeout instead of sleep for faster shutdown response
+                self._task_executor_shutdown_event.wait(0.1)
                 continue
 
             # start task execution asynchronously
@@ -216,3 +217,20 @@ class TaskExecutor:
         """
         with self._task_executor_lock:
             return self._task_executor_last_executed_task_info
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        """
+        Signal the worker thread to stop and wait for it to finish.
+
+        :param timeout: the maximum time to wait for the worker thread to finish in seconds,
+            or None to wait indefinitely
+        """
+        log.info(f"Shutting down TaskExecutor (timeout={timeout}s)")
+        self._task_executor_shutdown_event.set()
+        # Cancel currently executing task to prevent blocking on long-running tasks
+        with self._task_executor_lock:
+            if self._task_executor_current_task is not None:
+                self._task_executor_current_task.cancel()
+        self._task_executor_thread.join(timeout=timeout)
+        if self._task_executor_thread.is_alive():
+            log.warning(f"TaskExecutor thread did not stop within {timeout}s timeout")

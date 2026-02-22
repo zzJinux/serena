@@ -35,6 +35,7 @@ from serena.constants import (
 )
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
+from serena.server.proxy import SerenaProxy
 from serena.tools import FindReferencingSymbolsTool, FindSymbolTool, GetSymbolsOverviewTool, SearchForPatternTool, ToolRegistry
 from serena.util.dataclass import get_dataclass_default
 from serena.util.logging import MemoryLogHandler
@@ -265,9 +266,6 @@ class TopLevelCommands(AutoRegisteringGroup):
         file_handler.formatter = formatter
         Logger.root.addHandler(file_handler)
 
-        log.info("Initializing Serena MCP server")
-        log.info("Storing logs in %s", log_path)
-
         # Handle --project-from-cwd flag
         if project_from_cwd:
             if project is not None or project_file_arg is not None:
@@ -279,6 +277,22 @@ class TopLevelCommands(AutoRegisteringGroup):
                 log.warning("No project root found from %s; not activating any project", os.getcwd())
 
         project_file = project_file_arg or project
+        if transport == "stdio":
+            # Use Session Proxy for stdio transport to support concurrent projects
+            log.info("Using Session Proxy for stdio transport")
+            project_path = project_file or os.getcwd()
+            proxy = SerenaProxy(project_path=project_path, context=context, modes=list(modes))
+            try:
+                import asyncio
+
+                asyncio.run(proxy.run())
+            except Exception as e:
+                log.error(f"Session Proxy failed: {e}")
+                sys.exit(1)
+            return
+
+        log.info("Initializing Serena MCP server")
+        log.info("Storing logs in %s", log_path)
         factory = SerenaMCPFactory(context=context, project=project_file, memory_log_handler=memory_log_handler)
         server = factory.create_mcp_server(
             host=host,
@@ -299,6 +313,63 @@ class TopLevelCommands(AutoRegisteringGroup):
             )
         log.info("Starting MCP server …")
         server.run(transport=transport)
+
+    @staticmethod
+    @click.command()
+    @click.option("--socket-path", envvar="SERENA_DAEMON_SOCKET", help="Path to the daemon socket.")
+    @click.option(
+        "--log-level",
+        type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]),
+        default=None,
+        help="Override log level in config.",
+    )
+    @click.option("--enable-gui-log-window", type=bool, is_flag=False, default=None, help="Override GUI log window setting in config.")
+    def start_daemon(socket_path: str | None, log_level: str | None, enable_gui_log_window: bool | None):
+        """Start the Serena Daemon."""
+        import asyncio
+
+        from serena.server.daemon import SerenaDaemon
+
+        # Configure logging
+        # We use the same logging setup as start_mcp_server
+        if log_level:
+            Logger.root.setLevel(log_level)
+        else:
+            Logger.root.setLevel(logging.INFO)
+
+        formatter = logging.Formatter(SERENA_LOG_FORMAT)
+
+        # Memory handler for GUI log window if enabled
+        memory_log_handler = None
+        if enable_gui_log_window:
+            memory_log_handler = MemoryLogHandler()
+            Logger.root.addHandler(memory_log_handler)
+
+        stderr_handler = logging.StreamHandler(stream=sys.stderr)
+        stderr_handler.formatter = formatter
+        Logger.root.addHandler(stderr_handler)
+
+        # File handler
+        log_path = SerenaPaths().get_next_log_file_path("daemon")
+        file_handler = logging.FileHandler(log_path, mode="w")
+        file_handler.formatter = formatter
+        Logger.root.addHandler(file_handler)
+
+        log.info("Initializing Serena Daemon")
+        log.info("Storing logs in %s", log_path)
+
+        daemon = SerenaDaemon()
+        if socket_path:
+            daemon.socket_path = Path(socket_path)
+
+        log.info(f"Starting Serena Daemon on {daemon.socket_path}")
+        try:
+            asyncio.run(daemon.start())
+        except KeyboardInterrupt:
+            log.info("Daemon stopped by user")
+        except Exception as e:
+            log.error(f"Daemon failed: {e}")
+            sys.exit(1)
 
     @staticmethod
     @click.command(

@@ -70,6 +70,7 @@ class Project(ToStringMixin):
         self.project_config = project_config
         self.memories_manager = MemoriesManager(project_root)
         self.language_server_manager: LanguageServerManager | None = None
+        self._ls_creation_lock = threading.Lock()
         self._is_newly_created = is_newly_created
 
         # create .gitignore file in the project's Serena data folder if not yet present
@@ -425,23 +426,24 @@ class Project(ToStringMixin):
             see docstrings in the inits of subclasses of SolidLanguageServer to see what values may be passed.
         :return: the language server manager, which is also stored in the project instance
         """
-        # if there is an existing instance, stop its language servers first
-        if self.language_server_manager is not None:
-            log.info("Stopping existing language server manager ...")
-            self.language_server_manager.stop_all()
-            self.language_server_manager = None
+        with self._ls_creation_lock:
+            # if there is an existing instance, stop its language servers first
+            if self.language_server_manager is not None:
+                log.info("Stopping existing language server manager ...")
+                self.language_server_manager.stop_all()
+                self.language_server_manager = None
 
-        log.info(f"Creating language server manager for {self.project_root}")
-        factory = LanguageServerFactory(
-            project_root=self.project_root,
-            encoding=self.project_config.encoding,
-            ignored_patterns=self._ignored_patterns,
-            ls_timeout=ls_timeout,
-            ls_specific_settings=ls_specific_settings,
-            trace_lsp_communication=trace_lsp_communication,
-        )
-        self.language_server_manager = LanguageServerManager.from_languages(self.project_config.languages, factory)
-        return self.language_server_manager
+            log.info(f"Creating language server manager for {self.project_root}")
+            factory = LanguageServerFactory(
+                project_root=self.project_root,
+                encoding=self.project_config.encoding,
+                ignored_patterns=self._ignored_patterns,
+                ls_timeout=ls_timeout,
+                ls_specific_settings=ls_specific_settings,
+                trace_lsp_communication=trace_lsp_communication,
+            )
+            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.languages, factory)
+            return self.language_server_manager
 
     def add_language(self, language: Language) -> None:
         """

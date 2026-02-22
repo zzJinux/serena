@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from logging import Logger
 from typing import TYPE_CHECKING, Optional, TypeVar
@@ -31,6 +32,7 @@ from solidlsp.ls_config import Language
 
 if TYPE_CHECKING:
     from serena.gui_log_viewer import GuiLogViewer
+    from serena.server.daemon import SharedProjectPool
 
 log = logging.getLogger(__name__)
 TTool = TypeVar("TTool", bound="Tool")
@@ -231,6 +233,9 @@ class SerenaAgent:
         :param memory_log_handler: a MemoryLogHandler instance from which to read log messages; if None, a new one will be created
             if necessary.
         """
+        self._is_initialized = False
+        self._shutdown_lock = threading.Lock()
+
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
 
@@ -239,6 +244,7 @@ class SerenaAgent:
 
         # project-specific instances, which will be initialized upon project activation
         self._active_project: Project | None = None
+        self._project_pool: "SharedProjectPool | None" = None
 
         # dashboard URL (set when dashboard is started)
         self._dashboard_url: str | None = None
@@ -249,12 +255,14 @@ class SerenaAgent:
             log.info(f"Changing the root logger level to {serena_log_level}")
             Logger.root.setLevel(serena_log_level)
 
+        # Store memory log handler reference for cleanup in shutdown()
+        self._memory_log_handler: MemoryLogHandler | None = memory_log_handler
+
         def get_memory_log_handler() -> MemoryLogHandler:
-            nonlocal memory_log_handler
-            if memory_log_handler is None:
-                memory_log_handler = MemoryLogHandler(level=serena_log_level)
-                Logger.root.addHandler(memory_log_handler)
-            return memory_log_handler
+            if self._memory_log_handler is None:
+                self._memory_log_handler = MemoryLogHandler(level=serena_log_level)
+                Logger.root.addHandler(self._memory_log_handler)
+            return self._memory_log_handler
 
         # open GUI log window if enabled
         self._gui_log_viewer: Optional["GuiLogViewer"] = None
@@ -364,6 +372,8 @@ class SerenaAgent:
             # inform the GUI window (if any)
             if self._gui_log_viewer is not None:
                 self._gui_log_viewer.set_dashboard_url(dashboard_url)
+
+        self._is_initialized = True
 
     def get_current_tasks(self) -> list[TaskExecutor.TaskInfo]:
         """
@@ -619,6 +629,8 @@ class SerenaAgent:
 
     def _activate_project(self, project: Project, update_modes_and_tools: bool = True) -> None:
         log.info(f"Activating {project.project_name} at {project.project_root}")
+        if self._project_pool is not None:
+            project = self._project_pool.acquire(project.project_root, create_fn=lambda: project)
         self._active_project = project
 
         if update_modes_and_tools:
@@ -630,7 +642,9 @@ class SerenaAgent:
                 self.reset_language_server_manager()
 
         # initialize the language server in the background (if in language server mode)
-        if self.is_using_language_server():
+        # The `language_server_manager is None` guard prevents re-initializing on a shared
+        # project that already has language servers running.
+        if self.is_using_language_server() and project.language_server_manager is None:
             self.issue_task(init_language_server_manager)
 
         if self._project_activation_callback is not None:
@@ -781,16 +795,35 @@ class SerenaAgent:
         """
         Shuts down the agent, freeing resources and stopping background tasks.
         """
-        if not hasattr(self, "_is_initialized"):
-            return
+        with self._shutdown_lock:
+            if not getattr(self, "_is_initialized", False):
+                return
+            self._is_initialized = False  # Prevent double shutdown
         log.info("SerenaAgent is shutting down ...")
+
+        # Shutdown task executor
+        if hasattr(self, "_task_executor"):
+            self._task_executor.shutdown(timeout=timeout)
+
+        # Shutdown active project (language servers)
         if self._active_project is not None:
-            self._active_project.shutdown(timeout=timeout)
+            if self._project_pool is not None:
+                self._project_pool.release(self._active_project.project_root, timeout=timeout)
+            else:
+                self._active_project.shutdown(timeout=timeout)
             self._active_project = None
+
+        # Stop GUI log viewer
         if self._gui_log_viewer:
             log.info("Stopping the GUI log window ...")
             self._gui_log_viewer.stop()
             self._gui_log_viewer = None
+
+        # Remove and stop memory log handler from root logger
+        if hasattr(self, "_memory_log_handler") and self._memory_log_handler is not None:
+            Logger.root.removeHandler(self._memory_log_handler)
+            self._memory_log_handler.stop()
+            self._memory_log_handler = None
 
     def get_tool_by_name(self, tool_name: str) -> Tool:
         tool_class = ToolRegistry().get_tool_class_by_name(tool_name)
