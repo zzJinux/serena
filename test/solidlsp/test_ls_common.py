@@ -15,30 +15,25 @@ class TestLanguageServerCommonFunctionality:
         is_ci and is_windows, reason="This test is flaky in Windows CI (file system does not update modified time reliably)."
     )
     @pytest.mark.parametrize("language_server", [Language.PYTHON], indirect=True)
-    def test_open_file_cache_invalidate(self, language_server: SolidLanguageServer) -> None:
-        """
-        Tests that the file buffer cache is invalidated when the file is changed on disk.
-        """
+    def test_open_file_resync_on_reopen(self, language_server: SolidLanguageServer) -> None:
         file_path = os.path.join(language_server.repository_root_path, "test_open_file.py")
+        rel_path = os.path.relpath(file_path, language_server.repository_root_path)
         test_string1 = "# foo"
         test_string2 = "# bar"
-
         with open(file_path, "w") as f:
             f.write(test_string1)
-
         try:
-            with language_server.open_file(file_path) as fb:
-                assert fb.contents == test_string1
-
-                # apply external change to file
+            with language_server.open_file(rel_path) as fb_outer:
+                assert fb_outer.contents == test_string1
+                # External modification while buffer is open
+                time.sleep(1)
                 with open(file_path, "w") as f:
                     f.write(test_string2)
-
-                # give the file system some time to update the modified time
-                time.sleep(3)
-
-                # check that the file buffer has been invalidated and reloaded
-                assert fb.contents == test_string2
-
+                # Plain attribute — does NOT auto-detect
+                assert fb_outer.contents == test_string1
+                # Re-open triggers refresh on the existing buffer
+                with language_server.open_file(rel_path) as fb_inner:
+                    assert fb_inner is fb_outer
+                    assert fb_inner.contents == test_string2
         finally:
             os.remove(file_path)
